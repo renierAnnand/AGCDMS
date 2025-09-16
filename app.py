@@ -3,6 +3,33 @@ from typing import List, Tuple, Optional, Dict, Any
 import streamlit as st
 from PIL import Image, ImageDraw
 import json
+import base64
+import mimetypes
+
+# ============================================================
+# App configuration
+# ============================================================
+APP_TITLE = "Enterprise DMS + Work Management Prototype"
+DB_PATH = "dms.sqlite3"
+FILES_DIR = "dms_files"
+os.makedirs(FILES_DIR, exist_ok=True)
+
+# ============================================================
+# Document Preview Configuration
+# ============================================================
+PREVIEWABLE_TYPES = {
+    # Images
+    '.jpg': 'image', '.jpeg': 'image', '.png': 'image', '.gif': 'image', '.bmp': 'image', '.webp': 'image',
+    # Text files
+    '.txt': 'text', '.md': 'text', '.csv': 'csv', '.json': 'json', '.xml': 'text', '.log': 'text',
+    # Code files
+    '.py': 'code', '.js': 'code', '.html': 'code', '.css': 'code', '.sql': 'code', '.yaml': 'code', '.yml': 'code',
+    # Documents
+    '.pdf': 'pdf', '.rtf': 'text', '.ini': 'text', '.cfg': 'text', '.conf': 'text'
+}
+
+MAX_PREVIEW_SIZE = 10 * 1024 * 1024  # 10MB max for preview
+MAX_TEXT_PREVIEW = 50000  # Max characters for text preview
 
 # ============================================================
 # App configuration
@@ -398,8 +425,210 @@ def list_versions(document_id: str):
     return rows
 
 # ============================================================
-# Custom Workflow Management Functions
+# Document Preview Functions for Approvers
 # ============================================================
+def get_file_info(file_path: str) -> dict:
+    """Get file information for preview"""
+    if not os.path.exists(file_path):
+        return {"error": "File not found"}
+    
+    stat = os.stat(file_path)
+    file_ext = os.path.splitext(file_path)[1].lower()
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
+    return {
+        "name": os.path.basename(file_path),
+        "size": stat.st_size,
+        "extension": file_ext,
+        "mime_type": mime_type or "unknown",
+        "modified": dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "preview_type": PREVIEWABLE_TYPES.get(file_ext, "unsupported")
+    }
+
+def create_pdf_viewer(file_path: str) -> str:
+    """Create PDF viewer for browser"""
+    with open(file_path, "rb") as f:
+        pdf_data = f.read()
+    
+    pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+    pdf_viewer_html = f"""
+    <iframe 
+        src="data:application/pdf;base64,{pdf_base64}" 
+        width="100%" 
+        height="600px" 
+        style="border: 1px solid #ccc; border-radius: 4px;">
+        <p>PDF preview not supported. <a href="data:application/pdf;base64,{pdf_base64}">Download PDF</a></p>
+    </iframe>
+    """
+    return pdf_viewer_html
+
+def preview_image_file(file_path: str):
+    """Display image preview"""
+    try:
+        image = Image.open(file_path)
+        st.image(image, caption=os.path.basename(file_path), use_column_width=True)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Width", f"{image.width}px")
+        with col2:
+            st.metric("Height", f"{image.height}px")
+        with col3:
+            st.metric("Format", image.format or "Unknown")
+            
+    except Exception as e:
+        st.error(f"Cannot load image: {str(e)}")
+
+def preview_text_file(file_path: str, file_type: str = "text"):
+    """Display text file preview"""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read(MAX_TEXT_PREVIEW)
+        
+        if len(content) == MAX_TEXT_PREVIEW:
+            st.warning("File truncated for preview (first 50,000 characters shown)")
+        
+        if file_type == "code":
+            ext = os.path.splitext(file_path)[1].lower()
+            language_map = {'.py': 'python', '.js': 'javascript', '.html': 'html', 
+                          '.css': 'css', '.sql': 'sql', '.yaml': 'yaml', '.yml': 'yaml'}
+            language = language_map.get(ext, 'text')
+            st.code(content, language=language)
+        elif file_type == "json":
+            try:
+                import json
+                parsed = json.loads(content)
+                st.json(parsed)
+            except:
+                st.code(content, language="json")
+        else:
+            st.text(content)
+            
+    except Exception as e:
+        st.error(f"Cannot read text file: {str(e)}")
+
+def preview_pdf_file(file_path: str):
+    """Display PDF preview"""
+    file_size = os.path.getsize(file_path)
+    
+    if file_size > MAX_PREVIEW_SIZE:
+        st.warning(f"PDF is large ({file_size / 1024 / 1024:.1f} MB). Download to view.")
+        with open(file_path, "rb") as f:
+            st.download_button("Download PDF", data=f.read(), 
+                             file_name=os.path.basename(file_path), mime="application/pdf")
+        return
+    
+    try:
+        pdf_html = create_pdf_viewer(file_path)
+        st.components.v1.html(pdf_html, height=650)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("File Size", f"{file_size / 1024:.1f} KB")
+        with col2:
+            st.metric("Type", "PDF Document")
+            
+    except Exception as e:
+        st.error(f"PDF preview failed: {str(e)}")
+        with open(file_path, "rb") as f:
+            st.download_button("Download PDF", data=f.read(), 
+                             file_name=os.path.basename(file_path), mime="application/pdf")
+
+def render_document_preview_for_approval(file_path: str, file_info: dict):
+    """Render document preview optimized for approval workflow"""
+    preview_type = file_info.get("preview_type", "unsupported")
+    
+    # File info header
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("File", file_info["name"])
+    with col2:
+        st.metric("Size", f"{file_info['size'] / 1024:.1f} KB")
+    with col3:
+        st.metric("Type", file_info["extension"].upper())
+    
+    # Size check
+    if file_info["size"] > MAX_PREVIEW_SIZE:
+        st.warning(f"File too large ({file_info['size'] / 1024 / 1024:.1f} MB) for preview")
+        with open(file_path, "rb") as f:
+            st.download_button("Download to Review", data=f.read(), 
+                             file_name=file_info["name"])
+        return
+    
+    # Render preview
+    if preview_type == "image":
+        preview_image_file(file_path)
+    elif preview_type == "text":
+        preview_text_file(file_path, "text")
+    elif preview_type == "code":
+        preview_text_file(file_path, "code")
+    elif preview_type == "json":
+        preview_text_file(file_path, "json")
+    elif preview_type == "pdf":
+        preview_pdf_file(file_path)
+    else:
+        st.info("Preview not available for this file type")
+        st.write(f"MIME Type: {file_info.get('mime_type', 'Unknown')}")
+        
+        with open(file_path, "rb") as f:
+            st.download_button("Download File", data=f.read(), 
+                             file_name=file_info["name"])
+
+def create_approval_preview_interface(doc_id: str, document_title: str):
+    """Create approval interface with document preview"""
+    st.markdown(f"### Document Preview: {document_title}")
+    
+    # Get document versions
+    versions = list_versions(doc_id)
+    
+    if not versions:
+        st.warning("No document versions available for preview")
+        return
+    
+    # Version selector (default to latest)
+    if len(versions) > 1:
+        version_options = [f"v{v[0]} - {v[2][:16]} by {v[3]}" for v in versions]
+        selected_idx = st.selectbox("Select version to preview:", 
+                                   range(len(version_options)), 
+                                   format_func=lambda x: version_options[x])
+        selected_version = versions[selected_idx]
+    else:
+        selected_version = versions[0]
+        st.info(f"Viewing version {selected_version[0]} (latest)")
+    
+    version_num, file_path, created_at, created_by, note = selected_version
+    
+    # Version info
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.write(f"**Version:** {version_num}")
+    with col2:
+        st.write(f"**Created:** {created_at[:16]}")
+    with col3:
+        st.write(f"**Author:** {created_by}")
+    
+    if note:
+        st.info(f"Version Note: {note}")
+    
+    # Document preview
+    if os.path.exists(file_path):
+        file_info = get_file_info(file_path)
+        if "error" not in file_info:
+            render_document_preview_for_approval(file_path, file_info)
+        else:
+            st.error("File not accessible for preview")
+    else:
+        st.error("Document file not found")
+        
+    # Download option
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            st.download_button(
+                "Download Original File",
+                data=f.read(),
+                file_name=os.path.basename(file_path),
+                help="Download the original file for offline review"
+            )
 def create_custom_workflow(name: str, description: str, trigger_conditions: Dict[str, Any], created_by: str) -> str:
     """Create a new custom workflow"""
     workflow_id = str(uuid.uuid4())
@@ -1678,9 +1907,12 @@ def main():
     if pending_count > 0:
         st.sidebar.error(f"🔔 {pending_count} pending approval(s)")
 
+    # Enhanced navigation with workflow builder
     page = st.sidebar.radio("Go to", [
         "📄 Create Document", 
         "⚡ My Approvals", 
+        "🔧 Workflow Builder",
+        "👁️ Enhanced Viewer",
         "🔍 Search & Browse", 
         "📁 Upload", 
         "🎫 Start Request",
@@ -1692,6 +1924,10 @@ def main():
         page_create_document_enhanced(current_user)
     elif page == "⚡ My Approvals":
         page_my_approvals_enhanced(current_user)
+    elif page == "🔧 Workflow Builder":
+        page_workflow_builder(current_user)
+    elif page == "👁️ Enhanced Viewer":
+        page_enhanced_document_viewer(current_user)
     elif page == "🔍 Search & Browse":
         page_browse(current_user)
     elif page == "📁 Upload":
